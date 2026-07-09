@@ -1,0 +1,12 @@
+[package]
+name = "activate-linux"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A minimal Wayland Activate Linux overlay"
+
+[dependencies]
+cairo-rs = "0.20"
+libc = "0.2"
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
