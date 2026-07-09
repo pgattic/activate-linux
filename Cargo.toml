@@ -6,7 +6,7 @@ license = "MIT"
 description = "A minimal Wayland Activate Linux overlay"
 
 [dependencies]
-cairo-rs = "0.20"
+cairo-rs = { version = "0.20", default-features = false }
 libc = "0.2"
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }

@@ -1,7 +1,7 @@
 use std::{
     env,
     fs::File,
-    io::{Seek, SeekFrom, Write},
+    io::Write,
     os::fd::{AsFd, FromRawFd},
     process,
 };
@@ -35,8 +35,9 @@ const LINE2_FONT_SIZE: f64 = 16.0;
 
 struct App {
     compositor: WlCompositor,
-    shm: WlShm,
-    text: WatermarkText,
+    buffer: WlBuffer,
+    width: i32,
+    height: i32,
     overlays: Vec<Overlay>,
 }
 
@@ -48,8 +49,6 @@ struct WatermarkText {
 struct Overlay {
     surface: WlSurface,
     _layer_surface: ZwlrLayerSurfaceV1,
-    buffer: Option<WlBuffer>,
-    _shm_file: Option<File>,
 }
 
 struct LayerSurfaceData {
@@ -79,6 +78,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let compositor = bind::<WlCompositor>(&globals, &qh, 4..=6)?;
     let shm = bind::<WlShm>(&globals, &qh, 1..=1)?;
     let layer_shell = bind::<ZwlrLayerShellV1>(&globals, &qh, 1..=4)?;
+    let rendered = render_watermark(&text)?;
+    let width = rendered.width;
+    let height = rendered.height;
+    let buffer = create_shm_buffer(&shm, rendered, &qh)?;
     let outputs = globals
         .contents()
         .clone_list()
@@ -96,8 +99,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut app = App {
         compositor,
-        shm,
-        text,
+        buffer,
+        width,
+        height,
         overlays: Vec::with_capacity(outputs.len()),
     };
 
@@ -167,8 +171,7 @@ fn create_overlay(
         LayerSurfaceData { index },
     );
 
-    let (width, height) = watermark_size(&app.text)?;
-    layer_surface.set_size(width as u32, height as u32);
+    layer_surface.set_size(app.width as u32, app.height as u32);
     layer_surface.set_anchor(Anchor::Right | Anchor::Bottom);
     layer_surface.set_margin(0, RIGHT_MARGIN, BOTTOM_MARGIN, 0);
     layer_surface.set_exclusive_zone(-1);
@@ -183,17 +186,14 @@ fn create_overlay(
     app.overlays.push(Overlay {
         surface,
         _layer_surface: layer_surface,
-        buffer: None,
-        _shm_file: None,
     });
 
     Ok(())
 }
 
 fn watermark_size(text: &WatermarkText) -> Result<(i32, i32), Box<dyn std::error::Error>> {
-    let surface =
-        ImageSurface::create(Format::ARgb32, 1, 1).expect("create cairo measurement surface");
-    let cr = Context::new(&surface).expect("create cairo context");
+    let surface = ImageSurface::create(Format::ARgb32, 1, 1)?;
+    let cr = Context::new(&surface)?;
     let title = text_extents(&cr, &text.line1, LINE1_FONT_SIZE)?;
     let subtitle = text_extents(&cr, &text.line2, LINE2_FONT_SIZE)?;
 
@@ -256,19 +256,26 @@ fn points_to_pixels(points: f64) -> f64 {
     points * 96.0 / 72.0
 }
 
-fn draw_overlay(
-    app: &mut App,
-    index: usize,
+fn draw_overlay(app: &mut App, index: usize) -> Result<(), Box<dyn std::error::Error>> {
+    let overlay = &mut app.overlays[index];
+    overlay.surface.attach(Some(&app.buffer), 0, 0);
+    overlay.surface.damage_buffer(0, 0, app.width, app.height);
+    overlay.surface.commit();
+
+    Ok(())
+}
+
+fn create_shm_buffer(
+    shm: &WlShm,
+    rendered: RenderedWatermark,
     qh: &QueueHandle<App>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let rendered = render_watermark(&app.text)?;
+) -> Result<WlBuffer, Box<dyn std::error::Error>> {
     let size = rendered.pixels.len() as i32;
     let mut file = create_shm_file("activate-linux-watermark")?;
     file.set_len(size as u64)?;
-    file.seek(SeekFrom::Start(0))?;
     file.write_all(&rendered.pixels)?;
 
-    let pool = app.shm.create_pool(file.as_fd(), size, qh, ());
+    let pool = shm.create_pool(file.as_fd(), size, qh, ());
     let buffer = pool.create_buffer(
         0,
         rendered.width,
@@ -280,16 +287,7 @@ fn draw_overlay(
     );
     pool.destroy();
 
-    let overlay = &mut app.overlays[index];
-    overlay.surface.attach(Some(&buffer), 0, 0);
-    overlay
-        .surface
-        .damage_buffer(0, 0, rendered.width, rendered.height);
-    overlay.surface.commit();
-    overlay.buffer = Some(buffer);
-    overlay._shm_file = Some(file);
-
-    Ok(())
+    Ok(buffer)
 }
 
 fn create_shm_file(name: &str) -> Result<File, Box<dyn std::error::Error>> {
@@ -309,12 +307,12 @@ impl Dispatch<ZwlrLayerSurfaceV1, LayerSurfaceData> for App {
         event: LayerSurfaceEvent,
         data: &LayerSurfaceData,
         _conn: &Connection,
-        qh: &QueueHandle<Self>,
+        _qh: &QueueHandle<Self>,
     ) {
         match event {
             LayerSurfaceEvent::Configure { serial, .. } => {
                 layer_surface.ack_configure(serial);
-                if let Err(err) = draw_overlay(app, data.index, qh) {
+                if let Err(err) = draw_overlay(app, data.index) {
                     eprintln!("activate-linux: failed to draw overlay: {err}");
                 }
             }
