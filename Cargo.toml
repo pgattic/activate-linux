@@ -10,3 +10,9 @@ cairo-rs = "0.20"
 libc = "0.2"
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

@@ -1,4 +1,5 @@
 use std::{
+    env,
     fs::File,
     io::{Seek, SeekFrom, Write},
     os::fd::{AsFd, FromRawFd},
@@ -26,12 +27,22 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 const TEXT_ALPHA: f64 = 0x50 as f64 / 255.0;
 const RIGHT_MARGIN: i32 = 50;
 const BOTTOM_MARGIN: i32 = 50;
-const LINE_GAP: f64 = 5.0;
+const LINE_GAP: f64 = 16.0;
+const DEFAULT_LINE1: &str = "Activate Linux";
+const DEFAULT_LINE2: &str = "Go to Settings to activate Linux.";
+const LINE1_FONT_SIZE: f64 = 22.0;
+const LINE2_FONT_SIZE: f64 = 16.0;
 
 struct App {
     compositor: WlCompositor,
     shm: WlShm,
+    text: WatermarkText,
     overlays: Vec<Overlay>,
+}
+
+struct WatermarkText {
+    line1: String,
+    line2: String,
 }
 
 struct Overlay {
@@ -60,6 +71,7 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let text = parse_args()?;
     let conn = Connection::connect_to_env()?;
     let (globals, mut event_queue) = registry_queue_init::<App>(&conn)?;
     let qh = event_queue.handle();
@@ -85,16 +97,45 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App {
         compositor,
         shm,
+        text,
         overlays: Vec::with_capacity(outputs.len()),
     };
 
     for output in outputs {
-        create_overlay(&mut app, &layer_shell, &output, &qh);
+        create_overlay(&mut app, &layer_shell, &output, &qh)?;
     }
 
     loop {
         event_queue.blocking_dispatch(&mut app)?;
     }
+}
+
+fn parse_args() -> Result<WatermarkText, Box<dyn std::error::Error>> {
+    let mut args = env::args().skip(1);
+    let Some(line1) = args.next() else {
+        return Ok(WatermarkText {
+            line1: DEFAULT_LINE1.to_owned(),
+            line2: DEFAULT_LINE2.to_owned(),
+        });
+    };
+
+    if line1 == "-h" || line1 == "--help" {
+        print_usage();
+        process::exit(0);
+    }
+
+    let line2 = args.next().unwrap_or_else(|| DEFAULT_LINE2.to_owned());
+    if args.next().is_some() {
+        return Err("usage: activate-linux [line1 [line2]]".into());
+    }
+
+    Ok(WatermarkText { line1, line2 })
+}
+
+fn print_usage() {
+    println!(
+        "usage: activate-linux [line1 [line2]]\n\nDefaults:\n  line1: {DEFAULT_LINE1}\n  line2: {DEFAULT_LINE2}"
+    );
 }
 
 fn bind<I>(
@@ -114,7 +155,7 @@ fn create_overlay(
     layer_shell: &ZwlrLayerShellV1,
     output: &WlOutput,
     qh: &QueueHandle<App>,
-) {
+) -> Result<(), Box<dyn std::error::Error>> {
     let index = app.overlays.len();
     let surface = app.compositor.create_surface(qh, ());
     let layer_surface = layer_shell.get_layer_surface(
@@ -126,7 +167,7 @@ fn create_overlay(
         LayerSurfaceData { index },
     );
 
-    let (width, height) = watermark_size();
+    let (width, height) = watermark_size(&app.text)?;
     layer_surface.set_size(width as u32, height as u32);
     layer_surface.set_anchor(Anchor::Right | Anchor::Bottom);
     layer_surface.set_margin(0, RIGHT_MARGIN, BOTTOM_MARGIN, 0);
@@ -145,29 +186,35 @@ fn create_overlay(
         buffer: None,
         _shm_file: None,
     });
+
+    Ok(())
 }
 
-fn watermark_size() -> (i32, i32) {
+fn watermark_size(text: &WatermarkText) -> Result<(i32, i32), Box<dyn std::error::Error>> {
     let surface =
         ImageSurface::create(Format::ARgb32, 1, 1).expect("create cairo measurement surface");
     let cr = Context::new(&surface).expect("create cairo context");
-    let title = text_extents(&cr, "Activate Linux", 22.0);
-    let subtitle = text_extents(&cr, "Go to Settings to activate Linux", 14.0);
+    let title = text_extents(&cr, &text.line1, LINE1_FONT_SIZE)?;
+    let subtitle = text_extents(&cr, &text.line2, LINE2_FONT_SIZE)?;
 
     let width = title.0.max(subtitle.0).ceil() as i32;
     let height = (title.1 + LINE_GAP + subtitle.1).ceil() as i32;
-    (width.max(1), height.max(1))
+    Ok((width.max(1), height.max(1)))
 }
 
-fn text_extents(cr: &Context, text: &str, point_size: f64) -> (f64, f64) {
+fn text_extents(
+    cr: &Context,
+    text: &str,
+    point_size: f64,
+) -> Result<(f64, f64), Box<dyn std::error::Error>> {
     cr.select_font_face("Sans", FontSlant::Normal, FontWeight::Normal);
     cr.set_font_size(points_to_pixels(point_size));
-    let extents = cr.text_extents(text).expect("measure text");
-    (extents.x_advance(), extents.height())
+    let extents = cr.text_extents(text)?;
+    Ok((extents.x_advance(), extents.height()))
 }
 
-fn render_watermark() -> Result<RenderedWatermark, Box<dyn std::error::Error>> {
-    let (width, height) = watermark_size();
+fn render_watermark(text: &WatermarkText) -> Result<RenderedWatermark, Box<dyn std::error::Error>> {
+    let (width, height) = watermark_size(text)?;
     let mut surface = ImageSurface::create(Format::ARgb32, width, height)?;
 
     {
@@ -179,18 +226,18 @@ fn render_watermark() -> Result<RenderedWatermark, Box<dyn std::error::Error>> {
         cr.set_source_rgba(1.0, 1.0, 1.0, TEXT_ALPHA);
 
         cr.select_font_face("Sans", FontSlant::Normal, FontWeight::Normal);
-        cr.set_font_size(points_to_pixels(22.0));
-        let title = cr.text_extents("Activate Linux")?;
+        cr.set_font_size(points_to_pixels(LINE1_FONT_SIZE));
+        let title = cr.text_extents(&text.line1)?;
         cr.move_to(-title.x_bearing(), -title.y_bearing());
-        cr.show_text("Activate Linux")?;
+        cr.show_text(&text.line1)?;
 
-        cr.set_font_size(points_to_pixels(14.0));
-        let subtitle = cr.text_extents("Go to Settings to activate Linux")?;
+        cr.set_font_size(points_to_pixels(LINE2_FONT_SIZE));
+        let subtitle = cr.text_extents(&text.line2)?;
         cr.move_to(
             -subtitle.x_bearing(),
             title.height() + LINE_GAP - subtitle.y_bearing(),
         );
-        cr.show_text("Go to Settings to activate Linux")?;
+        cr.show_text(&text.line2)?;
     }
 
     surface.flush();
@@ -214,7 +261,7 @@ fn draw_overlay(
     index: usize,
     qh: &QueueHandle<App>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let rendered = render_watermark()?;
+    let rendered = render_watermark(&app.text)?;
     let size = rendered.pixels.len() as i32;
     let mut file = create_shm_file("activate-linux-watermark")?;
     file.set_len(size as u64)?;

@@ -13,6 +13,12 @@ Run it with:
 nix run
 ```
 
+Override the displayed text with one or two positional arguments:
+
+```sh
+nix run -- "Activate Linux" "Go to Settings to activate Linux"
+```
+
 Build it with:
 
 ```sh
