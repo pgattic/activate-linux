@@ -169,26 +169,29 @@ fn text_extents(cr: &Context, text: &str, point_size: f64) -> (f64, f64) {
 fn render_watermark() -> Result<RenderedWatermark, Box<dyn std::error::Error>> {
     let (width, height) = watermark_size();
     let mut surface = ImageSurface::create(Format::ARgb32, width, height)?;
-    let cr = Context::new(&surface)?;
 
-    cr.set_operator(Operator::Clear);
-    cr.paint()?;
-    cr.set_operator(Operator::Over);
-    cr.set_source_rgba(1.0, 1.0, 1.0, TEXT_ALPHA);
+    {
+        let cr = Context::new(&surface)?;
 
-    cr.select_font_face("Sans", FontSlant::Normal, FontWeight::Normal);
-    cr.set_font_size(points_to_pixels(22.0));
-    let title = cr.text_extents("Activate Linux")?;
-    cr.move_to(-title.x_bearing(), -title.y_bearing());
-    cr.show_text("Activate Linux")?;
+        cr.set_operator(Operator::Clear);
+        cr.paint()?;
+        cr.set_operator(Operator::Over);
+        cr.set_source_rgba(1.0, 1.0, 1.0, TEXT_ALPHA);
 
-    cr.set_font_size(points_to_pixels(14.0));
-    let subtitle = cr.text_extents("Go to Settings to activate Linux")?;
-    cr.move_to(
-        -subtitle.x_bearing(),
-        title.height() + LINE_GAP - subtitle.y_bearing(),
-    );
-    cr.show_text("Go to Settings to activate Linux")?;
+        cr.select_font_face("Sans", FontSlant::Normal, FontWeight::Normal);
+        cr.set_font_size(points_to_pixels(22.0));
+        let title = cr.text_extents("Activate Linux")?;
+        cr.move_to(-title.x_bearing(), -title.y_bearing());
+        cr.show_text("Activate Linux")?;
+
+        cr.set_font_size(points_to_pixels(14.0));
+        let subtitle = cr.text_extents("Go to Settings to activate Linux")?;
+        cr.move_to(
+            -subtitle.x_bearing(),
+            title.height() + LINE_GAP - subtitle.y_bearing(),
+        );
+        cr.show_text("Go to Settings to activate Linux")?;
+    }
 
     surface.flush();
     let stride = surface.stride();
