@@ -1,29 +1,21 @@
 # Activate Linux
 
-A tiny Rust Wayland overlay that recreates the QuickShell `Activate Linux`
-example without Qt, QML, or a GUI toolkit.
+*Go to Settings to activate Linux.*
 
-It creates one wlroots layer-shell overlay surface per monitor, anchors each
-surface to the bottom-right corner, renders semi-transparent white text with
-Cairo, and sets an empty input region so pointer events pass through.
+A minimal Wayland shell overlay that displays an "Activate Linux" watermark, similar to the classic "Activate Windows" watermark found on unregistered Windows installations.
 
-Run it with:
+## Usage
 
-```sh
-nix run
-```
+NixOS users can try this program right now with `nix run github:pgattic/activate-linux`.
 
-Override the displayed text with one or two positional arguments:
+Otherwise, install the Rust language toolchain, then compile and run this program with:
 
 ```sh
-nix run -- "Activate Linux" "Go to Settings to activate Linux."
+cargo run --release
 ```
 
-Build it with:
+Make it say whatever you want using positional arguments:
 
 ```sh
-nix build
+cargo run --release -- "First line" "Second line"
 ```
-
-This requires a Wayland compositor that supports `zwlr_layer_shell_v1`, such as
-Sway, Hyprland, River, Wayfire, or wlroots-based compositors.
