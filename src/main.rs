@@ -31,13 +31,13 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 };
 
 const TEXT_ALPHA: f64 = 0x50 as f64 / 255.0;
-const RIGHT_MARGIN: i32 = 50;
-const BOTTOM_MARGIN: i32 = 50;
+const RIGHT_MARGIN: i32 = 80;
+const BOTTOM_MARGIN: i32 = 110 - 60; // Windows taskbar is 60px
 const LINE_GAP: f64 = 16.0;
 const DEFAULT_LINE1: &str = "Activate Linux";
 const DEFAULT_LINE2: &str = "Go to Settings to activate Linux.";
-const LINE1_FONT_SIZE: f64 = 22.0;
-const LINE2_FONT_SIZE: f64 = 16.0;
+const LINE1_FONT_SIZE: f64 = 16.5;
+const LINE2_FONT_SIZE: f64 = 12.1;
 
 struct App {
     compositor: WlCompositor,
