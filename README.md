@@ -6,16 +6,35 @@ A minimal Wayland shell overlay that displays an "Activate Linux" watermark, sim
 
 ## Usage
 
-NixOS users can try this program right now with `nix run github:pgattic/activate-linux`.
-
-Otherwise, install the Rust language toolchain, then compile and run this program with:
+NixOS users can try this program right now:
 
 ```sh
-cargo run --release
+nix run github:pgattic/activate-linux
+```
+
+Otherwise, you'll first need to install system dependencies:
+
+```sh
+# Need Cairo and Wayland C libraries
+
+sudo pacman -S cairo wayland # Arch Linux
+sudo dnf install cairo wayland-devel # Fedora
+```
+
+Then, use the Rust language toolchain to install this program:
+
+```sh
+cargo install --git https://github.com/pgattic/activate-linux
+```
+
+Run it with:
+
+```sh
+activate-linux
 ```
 
 Make it say whatever you want using positional arguments:
 
 ```sh
-cargo run --release -- "First line" "Second line"
+activate-linux "First line" "Second line"
 ```
