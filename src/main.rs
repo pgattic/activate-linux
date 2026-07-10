@@ -11,9 +11,15 @@ use wayland_client::{
     delegate_noop,
     globals::{registry_queue_init, BindError, GlobalListContents},
     protocol::{
-        wl_buffer::WlBuffer, wl_callback::WlCallback, wl_compositor::WlCompositor,
-        wl_output::WlOutput, wl_region::WlRegion, wl_registry::WlRegistry, wl_shm::WlShm,
-        wl_shm_pool::WlShmPool, wl_surface::WlSurface,
+        wl_buffer::WlBuffer,
+        wl_callback::WlCallback,
+        wl_compositor::WlCompositor,
+        wl_output::{Event as OutputEvent, WlOutput},
+        wl_region::WlRegion,
+        wl_registry::WlRegistry,
+        wl_shm::WlShm,
+        wl_shm_pool::WlShmPool,
+        wl_surface::WlSurface,
     },
     Connection, Dispatch, Proxy, QueueHandle,
 };
@@ -35,9 +41,10 @@ const LINE2_FONT_SIZE: f64 = 16.0;
 
 struct App {
     compositor: WlCompositor,
-    buffer: WlBuffer,
-    width: i32,
-    height: i32,
+    shm: WlShm,
+    text: WatermarkText,
+    logical_width: i32,
+    logical_height: i32,
     overlays: Vec<Overlay>,
 }
 
@@ -49,15 +56,23 @@ struct WatermarkText {
 struct Overlay {
     surface: WlSurface,
     _layer_surface: ZwlrLayerSurfaceV1,
+    scale: i32,
+    configured: bool,
+    buffer: Option<WlBuffer>,
+    _shm_file: Option<File>,
 }
 
 struct LayerSurfaceData {
     index: usize,
 }
 
+struct OutputData {
+    index: usize,
+}
+
 struct RenderedWatermark {
-    width: i32,
-    height: i32,
+    buffer_width: i32,
+    buffer_height: i32,
     stride: i32,
     pixels: Vec<u8>,
 }
@@ -78,18 +93,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let compositor = bind::<WlCompositor>(&globals, &qh, 4..=6)?;
     let shm = bind::<WlShm>(&globals, &qh, 1..=1)?;
     let layer_shell = bind::<ZwlrLayerShellV1>(&globals, &qh, 1..=4)?;
-    let rendered = render_watermark(&text)?;
-    let width = rendered.width;
-    let height = rendered.height;
-    let buffer = create_shm_buffer(&shm, rendered, &qh)?;
+    let (logical_width, logical_height) = watermark_size(&text)?;
     let outputs = globals
         .contents()
         .clone_list()
         .into_iter()
         .filter(|global| global.interface == WlOutput::interface().name)
-        .map(|global| {
+        .enumerate()
+        .map(|(index, global)| {
             let version = global.version.min(WlOutput::interface().version);
-            globals.bind::<WlOutput, _, _>(&qh, version..=version, ())
+            globals.bind::<WlOutput, _, _>(&qh, version..=version, OutputData { index })
         })
         .collect::<Result<Vec<_>, BindError>>()?;
 
@@ -99,9 +112,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut app = App {
         compositor,
-        buffer,
-        width,
-        height,
+        shm,
+        text,
+        logical_width,
+        logical_height,
         overlays: Vec::with_capacity(outputs.len()),
     };
 
@@ -171,7 +185,7 @@ fn create_overlay(
         LayerSurfaceData { index },
     );
 
-    layer_surface.set_size(app.width as u32, app.height as u32);
+    layer_surface.set_size(app.logical_width as u32, app.logical_height as u32);
     layer_surface.set_anchor(Anchor::Right | Anchor::Bottom);
     layer_surface.set_margin(0, RIGHT_MARGIN, BOTTOM_MARGIN, 0);
     layer_surface.set_exclusive_zone(-1);
@@ -186,6 +200,10 @@ fn create_overlay(
     app.overlays.push(Overlay {
         surface,
         _layer_surface: layer_surface,
+        scale: 1,
+        configured: false,
+        buffer: None,
+        _shm_file: None,
     });
 
     Ok(())
@@ -213,9 +231,14 @@ fn text_extents(
     Ok((extents.x_advance(), extents.height()))
 }
 
-fn render_watermark(text: &WatermarkText) -> Result<RenderedWatermark, Box<dyn std::error::Error>> {
-    let (width, height) = watermark_size(text)?;
-    let mut surface = ImageSurface::create(Format::ARgb32, width, height)?;
+fn render_watermark(
+    text: &WatermarkText,
+    scale: i32,
+) -> Result<RenderedWatermark, Box<dyn std::error::Error>> {
+    let (logical_width, logical_height) = watermark_size(text)?;
+    let buffer_width = logical_width * scale;
+    let buffer_height = logical_height * scale;
+    let mut surface = ImageSurface::create(Format::ARgb32, buffer_width, buffer_height)?;
 
     {
         let cr = Context::new(&surface)?;
@@ -224,6 +247,7 @@ fn render_watermark(text: &WatermarkText) -> Result<RenderedWatermark, Box<dyn s
         cr.paint()?;
         cr.set_operator(Operator::Over);
         cr.set_source_rgba(1.0, 1.0, 1.0, TEXT_ALPHA);
+        cr.scale(scale as f64, scale as f64);
 
         cr.select_font_face("Sans", FontSlant::Normal, FontWeight::Normal);
         cr.set_font_size(points_to_pixels(LINE1_FONT_SIZE));
@@ -245,8 +269,8 @@ fn render_watermark(text: &WatermarkText) -> Result<RenderedWatermark, Box<dyn s
     let pixels = surface.data()?.to_vec();
 
     Ok(RenderedWatermark {
-        width,
-        height,
+        buffer_width,
+        buffer_height,
         stride,
         pixels,
     })
@@ -256,11 +280,23 @@ fn points_to_pixels(points: f64) -> f64 {
     points * 96.0 / 72.0
 }
 
-fn draw_overlay(app: &mut App, index: usize) -> Result<(), Box<dyn std::error::Error>> {
+fn draw_overlay(
+    app: &mut App,
+    index: usize,
+    qh: &QueueHandle<App>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let scale = app.overlays[index].scale;
+    let rendered = render_watermark(&app.text, scale)?;
+    let (buffer, file) = create_shm_buffer(&app.shm, rendered, qh)?;
     let overlay = &mut app.overlays[index];
-    overlay.surface.attach(Some(&app.buffer), 0, 0);
-    overlay.surface.damage_buffer(0, 0, app.width, app.height);
+    overlay.surface.set_buffer_scale(scale);
+    overlay.surface.attach(Some(&buffer), 0, 0);
+    overlay
+        .surface
+        .damage_buffer(0, 0, app.logical_width * scale, app.logical_height * scale);
     overlay.surface.commit();
+    overlay.buffer = Some(buffer);
+    overlay._shm_file = Some(file);
 
     Ok(())
 }
@@ -269,7 +305,7 @@ fn create_shm_buffer(
     shm: &WlShm,
     rendered: RenderedWatermark,
     qh: &QueueHandle<App>,
-) -> Result<WlBuffer, Box<dyn std::error::Error>> {
+) -> Result<(WlBuffer, File), Box<dyn std::error::Error>> {
     let size = rendered.pixels.len() as i32;
     let mut file = create_shm_file("activate-linux-watermark")?;
     file.set_len(size as u64)?;
@@ -278,8 +314,8 @@ fn create_shm_buffer(
     let pool = shm.create_pool(file.as_fd(), size, qh, ());
     let buffer = pool.create_buffer(
         0,
-        rendered.width,
-        rendered.height,
+        rendered.buffer_width,
+        rendered.buffer_height,
         rendered.stride,
         wayland_client::protocol::wl_shm::Format::Argb8888,
         qh,
@@ -287,7 +323,7 @@ fn create_shm_buffer(
     );
     pool.destroy();
 
-    Ok(buffer)
+    Ok((buffer, file))
 }
 
 fn create_shm_file(name: &str) -> Result<File, Box<dyn std::error::Error>> {
@@ -307,17 +343,50 @@ impl Dispatch<ZwlrLayerSurfaceV1, LayerSurfaceData> for App {
         event: LayerSurfaceEvent,
         data: &LayerSurfaceData,
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
         match event {
             LayerSurfaceEvent::Configure { serial, .. } => {
                 layer_surface.ack_configure(serial);
-                if let Err(err) = draw_overlay(app, data.index) {
+                app.overlays[data.index].configured = true;
+                if let Err(err) = draw_overlay(app, data.index, qh) {
                     eprintln!("activate-linux: failed to draw overlay: {err}");
                 }
             }
             LayerSurfaceEvent::Closed => process::exit(0),
             _ => {}
+        }
+    }
+}
+
+impl Dispatch<WlOutput, OutputData> for App {
+    fn event(
+        app: &mut Self,
+        _output: &WlOutput,
+        event: OutputEvent,
+        data: &OutputData,
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        let OutputEvent::Scale { factor } = event else {
+            return;
+        };
+
+        let scale = factor.max(1);
+        let Some(overlay) = app.overlays.get_mut(data.index) else {
+            return;
+        };
+        if overlay.scale == scale {
+            return;
+        }
+
+        overlay.scale = scale;
+        if !overlay.configured {
+            return;
+        }
+
+        if let Err(err) = draw_overlay(app, data.index, qh) {
+            eprintln!("activate-linux: failed to redraw scaled overlay: {err}");
         }
     }
 }
@@ -340,6 +409,5 @@ delegate_noop!(App: ignore WlShmPool);
 delegate_noop!(App: ignore WlBuffer);
 delegate_noop!(App: ignore WlSurface);
 delegate_noop!(App: ignore WlRegion);
-delegate_noop!(App: ignore WlOutput);
 delegate_noop!(App: ignore WlCallback);
 delegate_noop!(App: ignore ZwlrLayerShellV1);
