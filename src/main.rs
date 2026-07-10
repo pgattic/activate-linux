@@ -38,6 +38,7 @@ const DEFAULT_LINE1: &str = "Activate Linux";
 const DEFAULT_LINE2: &str = "Go to Settings to activate Linux.";
 const LINE1_FONT_SIZE: f64 = 16.5;
 const LINE2_FONT_SIZE: f64 = 12.1;
+const RASTER_PADDING: f64 = 4.0;
 
 struct App {
     compositor: WlCompositor,
@@ -75,6 +76,21 @@ struct RenderedWatermark {
     buffer_height: i32,
     stride: i32,
     pixels: Vec<u8>,
+}
+
+#[derive(Clone, Copy)]
+struct LineExtents {
+    x_bearing: f64,
+    y_bearing: f64,
+    width: f64,
+    height: f64,
+}
+
+struct WatermarkLayout {
+    width: i32,
+    height: i32,
+    title: LineExtents,
+    subtitle: LineExtents,
 }
 
 fn main() {
@@ -187,7 +203,7 @@ fn create_overlay(
 
     layer_surface.set_size(app.logical_width as u32, app.logical_height as u32);
     layer_surface.set_anchor(Anchor::Right | Anchor::Bottom);
-    layer_surface.set_margin(0, RIGHT_MARGIN, BOTTOM_MARGIN, 0);
+    layer_surface.set_margin(0, RIGHT_MARGIN - RASTER_PADDING as i32, BOTTOM_MARGIN - RASTER_PADDING as i32, 0);
     layer_surface.set_exclusive_zone(-1);
     layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
 
@@ -210,32 +226,50 @@ fn create_overlay(
 }
 
 fn watermark_size(text: &WatermarkText) -> Result<(i32, i32), Box<dyn std::error::Error>> {
-    let surface = ImageSurface::create(Format::ARgb32, 1, 1)?;
-    let cr = Context::new(&surface)?;
-    let title = text_extents(&cr, &text.line1, LINE1_FONT_SIZE)?;
-    let subtitle = text_extents(&cr, &text.line2, LINE2_FONT_SIZE)?;
-
-    let width = title.0.max(subtitle.0).ceil() as i32;
-    let height = (title.1 + LINE_GAP + subtitle.1).ceil() as i32;
-    Ok((width.max(1), height.max(1)))
+    let layout = watermark_layout(text)?;
+    Ok((layout.width, layout.height))
 }
 
-fn text_extents(
+fn watermark_layout(text: &WatermarkText) -> Result<WatermarkLayout, Box<dyn std::error::Error>> {
+    let surface = ImageSurface::create(Format::ARgb32, 1, 1)?;
+    let cr = Context::new(&surface)?;
+    let title = line_extents(&cr, &text.line1, LINE1_FONT_SIZE)?;
+    let subtitle = line_extents(&cr, &text.line2, LINE2_FONT_SIZE)?;
+
+    let width = (title.width.max(subtitle.width) + RASTER_PADDING * 2.0).ceil() as i32;
+    let height = (title.height + LINE_GAP + subtitle.height + RASTER_PADDING * 2.0).ceil() as i32;
+
+    Ok(WatermarkLayout {
+        width: width.max(1),
+        height: height.max(1),
+        title,
+        subtitle,
+    })
+}
+
+fn line_extents(
     cr: &Context,
     text: &str,
     point_size: f64,
-) -> Result<(f64, f64), Box<dyn std::error::Error>> {
+) -> Result<LineExtents, Box<dyn std::error::Error>> {
     cr.select_font_face("Sans", FontSlant::Normal, FontWeight::Normal);
     cr.set_font_size(points_to_pixels(point_size));
     let extents = cr.text_extents(text)?;
-    Ok((extents.x_advance(), extents.height()))
+    Ok(LineExtents {
+        x_bearing: extents.x_bearing(),
+        y_bearing: extents.y_bearing(),
+        width: extents.width(),
+        height: extents.height(),
+    })
 }
 
 fn render_watermark(
     text: &WatermarkText,
     scale: i32,
 ) -> Result<RenderedWatermark, Box<dyn std::error::Error>> {
-    let (logical_width, logical_height) = watermark_size(text)?;
+    let layout = watermark_layout(text)?;
+    let logical_width = layout.width;
+    let logical_height = layout.height;
     let buffer_width = logical_width * scale;
     let buffer_height = logical_height * scale;
     let mut surface = ImageSurface::create(Format::ARgb32, buffer_width, buffer_height)?;
@@ -251,15 +285,16 @@ fn render_watermark(
 
         cr.select_font_face("Sans", FontSlant::Normal, FontWeight::Normal);
         cr.set_font_size(points_to_pixels(LINE1_FONT_SIZE));
-        let title = cr.text_extents(&text.line1)?;
-        cr.move_to(-title.x_bearing(), -title.y_bearing());
+        cr.move_to(
+            RASTER_PADDING - layout.title.x_bearing,
+            RASTER_PADDING - layout.title.y_bearing,
+        );
         cr.show_text(&text.line1)?;
 
         cr.set_font_size(points_to_pixels(LINE2_FONT_SIZE));
-        let subtitle = cr.text_extents(&text.line2)?;
         cr.move_to(
-            -subtitle.x_bearing(),
-            title.height() + LINE_GAP - subtitle.y_bearing(),
+            RASTER_PADDING - layout.subtitle.x_bearing,
+            RASTER_PADDING + layout.title.height + LINE_GAP - layout.subtitle.y_bearing,
         );
         cr.show_text(&text.line2)?;
     }
