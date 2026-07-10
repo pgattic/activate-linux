@@ -30,6 +30,8 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     },
 };
 
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
 const TEXT_ALPHA: f64 = 0x50 as f64 / 255.0;
 const RIGHT_MARGIN: i32 = 80;
 const BOTTOM_MARGIN: i32 = 110 - 60; // Windows taskbar is 60px
@@ -38,7 +40,7 @@ const DEFAULT_LINE1: &str = "Activate Linux";
 const DEFAULT_LINE2: &str = "Go to Settings to activate Linux.";
 const LINE1_FONT_SIZE: f64 = 16.5;
 const LINE2_FONT_SIZE: f64 = 12.1;
-const RASTER_PADDING: f64 = 4.0;
+const RASTER_PADDING: i32 = 4;
 
 struct App {
     compositor: WlCompositor,
@@ -93,6 +95,26 @@ struct WatermarkLayout {
     subtitle: LineExtents,
 }
 
+impl WatermarkLayout {
+    fn measure(text: &WatermarkText) -> Result<Self> {
+        let surface = ImageSurface::create(Format::ARgb32, 1, 1)?;
+        let cr = Context::new(&surface)?;
+        let title = line_extents(&cr, &text.line1, LINE1_FONT_SIZE)?;
+        let subtitle = line_extents(&cr, &text.line2, LINE2_FONT_SIZE)?;
+        let padding = f64::from(RASTER_PADDING) * 2.0;
+
+        let width = (title.width.max(subtitle.width) + padding).ceil() as i32;
+        let height = (title.height + LINE_GAP + subtitle.height + padding).ceil() as i32;
+
+        Ok(Self {
+            width: width.max(1),
+            height: height.max(1),
+            title,
+            subtitle,
+        })
+    }
+}
+
 fn main() {
     if let Err(err) = run() {
         eprintln!("activate-linux: {err}");
@@ -100,7 +122,7 @@ fn main() {
     }
 }
 
-fn run() -> Result<(), Box<dyn std::error::Error>> {
+fn run() -> Result<()> {
     let text = parse_args()?;
     let conn = Connection::connect_to_env()?;
     let (globals, mut event_queue) = registry_queue_init::<App>(&conn)?;
@@ -109,7 +131,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let compositor = bind::<WlCompositor>(&globals, &qh, 4..=6)?;
     let shm = bind::<WlShm>(&globals, &qh, 1..=1)?;
     let layer_shell = bind::<ZwlrLayerShellV1>(&globals, &qh, 1..=4)?;
-    let (logical_width, logical_height) = watermark_size(&text)?;
+    let layout = WatermarkLayout::measure(&text)?;
     let outputs = globals
         .contents()
         .clone_list()
@@ -120,7 +142,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let version = global.version.min(WlOutput::interface().version);
             globals.bind::<WlOutput, _, _>(&qh, version..=version, OutputData { index })
         })
-        .collect::<Result<Vec<_>, BindError>>()?;
+        .collect::<std::result::Result<Vec<_>, BindError>>()?;
 
     if outputs.is_empty() {
         return Err("compositor did not advertise any wl_output globals".into());
@@ -130,13 +152,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         compositor,
         shm,
         text,
-        logical_width,
-        logical_height,
+        logical_width: layout.width,
+        logical_height: layout.height,
         overlays: Vec::with_capacity(outputs.len()),
     };
 
     for output in outputs {
-        create_overlay(&mut app, &layer_shell, &output, &qh)?;
+        create_overlay(&mut app, &layer_shell, &output, &qh);
     }
 
     loop {
@@ -144,7 +166,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn parse_args() -> Result<WatermarkText, Box<dyn std::error::Error>> {
+fn parse_args() -> Result<WatermarkText> {
     let mut args = env::args().skip(1);
     let Some(line1) = args.next() else {
         return Ok(WatermarkText {
@@ -176,7 +198,7 @@ fn bind<I>(
     globals: &wayland_client::globals::GlobalList,
     qh: &QueueHandle<App>,
     version: std::ops::RangeInclusive<u32>,
-) -> Result<I, BindError>
+) -> std::result::Result<I, BindError>
 where
     I: wayland_client::Proxy + 'static,
     App: Dispatch<I, ()>,
@@ -189,7 +211,7 @@ fn create_overlay(
     layer_shell: &ZwlrLayerShellV1,
     output: &WlOutput,
     qh: &QueueHandle<App>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) {
     let index = app.overlays.len();
     let surface = app.compositor.create_surface(qh, ());
     let layer_surface = layer_shell.get_layer_surface(
@@ -203,7 +225,12 @@ fn create_overlay(
 
     layer_surface.set_size(app.logical_width as u32, app.logical_height as u32);
     layer_surface.set_anchor(Anchor::Right | Anchor::Bottom);
-    layer_surface.set_margin(0, RIGHT_MARGIN - RASTER_PADDING as i32, BOTTOM_MARGIN - RASTER_PADDING as i32, 0);
+    layer_surface.set_margin(
+        0,
+        RIGHT_MARGIN - RASTER_PADDING,
+        BOTTOM_MARGIN - RASTER_PADDING,
+        0,
+    );
     layer_surface.set_exclusive_zone(-1);
     layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
 
@@ -221,37 +248,9 @@ fn create_overlay(
         buffer: None,
         _shm_file: None,
     });
-
-    Ok(())
 }
 
-fn watermark_size(text: &WatermarkText) -> Result<(i32, i32), Box<dyn std::error::Error>> {
-    let layout = watermark_layout(text)?;
-    Ok((layout.width, layout.height))
-}
-
-fn watermark_layout(text: &WatermarkText) -> Result<WatermarkLayout, Box<dyn std::error::Error>> {
-    let surface = ImageSurface::create(Format::ARgb32, 1, 1)?;
-    let cr = Context::new(&surface)?;
-    let title = line_extents(&cr, &text.line1, LINE1_FONT_SIZE)?;
-    let subtitle = line_extents(&cr, &text.line2, LINE2_FONT_SIZE)?;
-
-    let width = (title.width.max(subtitle.width) + RASTER_PADDING * 2.0).ceil() as i32;
-    let height = (title.height + LINE_GAP + subtitle.height + RASTER_PADDING * 2.0).ceil() as i32;
-
-    Ok(WatermarkLayout {
-        width: width.max(1),
-        height: height.max(1),
-        title,
-        subtitle,
-    })
-}
-
-fn line_extents(
-    cr: &Context,
-    text: &str,
-    point_size: f64,
-) -> Result<LineExtents, Box<dyn std::error::Error>> {
+fn line_extents(cr: &Context, text: &str, point_size: f64) -> Result<LineExtents> {
     cr.select_font_face("Sans", FontSlant::Normal, FontWeight::Normal);
     cr.set_font_size(points_to_pixels(point_size));
     let extents = cr.text_extents(text)?;
@@ -263,11 +262,8 @@ fn line_extents(
     })
 }
 
-fn render_watermark(
-    text: &WatermarkText,
-    scale: i32,
-) -> Result<RenderedWatermark, Box<dyn std::error::Error>> {
-    let layout = watermark_layout(text)?;
+fn render_watermark(text: &WatermarkText, scale: i32) -> Result<RenderedWatermark> {
+    let layout = WatermarkLayout::measure(text)?;
     let logical_width = layout.width;
     let logical_height = layout.height;
     let buffer_width = logical_width * scale;
@@ -286,15 +282,15 @@ fn render_watermark(
         cr.select_font_face("Sans", FontSlant::Normal, FontWeight::Normal);
         cr.set_font_size(points_to_pixels(LINE1_FONT_SIZE));
         cr.move_to(
-            RASTER_PADDING - layout.title.x_bearing,
-            RASTER_PADDING - layout.title.y_bearing,
+            f64::from(RASTER_PADDING) - layout.title.x_bearing,
+            f64::from(RASTER_PADDING) - layout.title.y_bearing,
         );
         cr.show_text(&text.line1)?;
 
         cr.set_font_size(points_to_pixels(LINE2_FONT_SIZE));
         cr.move_to(
-            RASTER_PADDING - layout.subtitle.x_bearing,
-            RASTER_PADDING + layout.title.height + LINE_GAP - layout.subtitle.y_bearing,
+            f64::from(RASTER_PADDING) - layout.subtitle.x_bearing,
+            f64::from(RASTER_PADDING) + layout.title.height + LINE_GAP - layout.subtitle.y_bearing,
         );
         cr.show_text(&text.line2)?;
     }
@@ -315,11 +311,7 @@ fn points_to_pixels(points: f64) -> f64 {
     points * 96.0 / 72.0
 }
 
-fn draw_overlay(
-    app: &mut App,
-    index: usize,
-    qh: &QueueHandle<App>,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn draw_overlay(app: &mut App, index: usize, qh: &QueueHandle<App>) -> Result<()> {
     let scale = app.overlays[index].scale;
     let rendered = render_watermark(&app.text, scale)?;
     let (buffer, file) = create_shm_buffer(&app.shm, rendered, qh)?;
@@ -340,7 +332,7 @@ fn create_shm_buffer(
     shm: &WlShm,
     rendered: RenderedWatermark,
     qh: &QueueHandle<App>,
-) -> Result<(WlBuffer, File), Box<dyn std::error::Error>> {
+) -> Result<(WlBuffer, File)> {
     let size = rendered.pixels.len() as i32;
     let mut file = create_shm_file("activate-linux-watermark")?;
     file.set_len(size as u64)?;
@@ -361,7 +353,7 @@ fn create_shm_buffer(
     Ok((buffer, file))
 }
 
-fn create_shm_file(name: &str) -> Result<File, Box<dyn std::error::Error>> {
+fn create_shm_file(name: &str) -> Result<File> {
     let cname = std::ffi::CString::new(name)?;
     let fd = unsafe { libc::memfd_create(cname.as_ptr(), libc::MFD_CLOEXEC) };
     if fd < 0 {
