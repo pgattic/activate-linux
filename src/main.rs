@@ -32,7 +32,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-const TEXT_ALPHA: f64 = 0x50 as f64 / 255.0;
+const TEXT_ALPHA: f64 = 0.35;
 const RIGHT_MARGIN: i32 = 80;
 const BOTTOM_MARGIN: i32 = 110 - 60; // Windows taskbar is 60px
 const LINE_GAP: f64 = 16.0;

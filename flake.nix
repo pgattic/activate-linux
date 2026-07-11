@@ -27,6 +27,7 @@
         ];
 
         buildInputs = commonBuildInputs;
+        meta.mainProgram = "activate-linux";
       };
 
       apps.default = {
