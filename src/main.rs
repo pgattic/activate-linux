@@ -1,5 +1,4 @@
 use std::{
-    env,
     fs::File,
     io::Write,
     os::fd::{AsFd, FromRawFd},
@@ -7,6 +6,7 @@ use std::{
 };
 
 use cairo::{Context, FontSlant, FontWeight, Format, ImageSurface, Operator};
+use clap::{Parser, ValueEnum};
 use wayland_client::{
     delegate_noop,
     globals::{registry_queue_init, BindError, GlobalListContents},
@@ -32,9 +32,13 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-const TEXT_ALPHA: f64 = 0.35;
-const RIGHT_MARGIN: i32 = 80;
-const BOTTOM_MARGIN: i32 = 110 - 60; // Windows taskbar is 60px
+const DEFAULT_OPACITY: f64 = 0.35;
+const DEFAULT_HORIZONTAL_MARGIN: i32 = 80;
+const DEFAULT_VERTICAL_MARGIN: i32 = 110 - 60; // Windows taskbar is 60px
+const DEFAULT_TOP_MARGIN: i32 = DEFAULT_VERTICAL_MARGIN;
+const DEFAULT_LEFT_MARGIN: i32 = DEFAULT_HORIZONTAL_MARGIN;
+const DEFAULT_RIGHT_MARGIN: i32 = DEFAULT_HORIZONTAL_MARGIN;
+const DEFAULT_BOTTOM_MARGIN: i32 = DEFAULT_VERTICAL_MARGIN;
 const LINE_GAP: f64 = 16.0;
 const DEFAULT_LINE1: &str = "Activate Linux";
 const DEFAULT_LINE2: &str = "Go to Settings to activate Linux.";
@@ -45,15 +49,129 @@ const RASTER_PADDING: i32 = 4;
 struct App {
     compositor: WlCompositor,
     shm: WlShm,
-    text: WatermarkText,
+    options: Options,
     logical_width: i32,
     logical_height: i32,
     overlays: Vec<Overlay>,
 }
 
+#[derive(Parser)]
+#[command(version, about)]
+struct Cli {
+    /// Corner to place the watermark in.
+    #[arg(long, value_enum, default_value_t = Corner::BottomRight)]
+    corner: Corner,
+
+    /// Set all edge margins, in logical pixels.
+    #[arg(long, value_name = "PX")]
+    margin: Option<i32>,
+
+    /// Top margin, in logical pixels.
+    #[arg(long, value_name = "PX")]
+    margin_top: Option<i32>,
+
+    /// Right margin, in logical pixels.
+    #[arg(long, value_name = "PX")]
+    margin_right: Option<i32>,
+
+    /// Bottom margin, in logical pixels.
+    #[arg(long, value_name = "PX")]
+    margin_bottom: Option<i32>,
+
+    /// Left margin, in logical pixels.
+    #[arg(long, value_name = "PX")]
+    margin_left: Option<i32>,
+
+    /// Text color as #RGB, #RRGGBB, RGB, or RRGGBB.
+    #[arg(long, default_value = "ffffff", value_parser = parse_color)]
+    color: Color,
+
+    /// Text opacity from 0.0 to 1.0.
+    #[arg(long, default_value_t = DEFAULT_OPACITY, value_parser = parse_opacity)]
+    opacity: f64,
+
+    /// First line of text.
+    #[arg(default_value = DEFAULT_LINE1)]
+    line1: String,
+
+    /// Second line of text.
+    #[arg(default_value = DEFAULT_LINE2)]
+    line2: String,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Corner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+struct Options {
+    text: WatermarkText,
+    corner: Corner,
+    margins: Margins,
+    color: Color,
+    opacity: f64,
+}
+
 struct WatermarkText {
     line1: String,
     line2: String,
+}
+
+struct Margins {
+    top: i32,
+    right: i32,
+    bottom: i32,
+    left: i32,
+}
+
+#[derive(Clone, Copy)]
+struct Color {
+    red: f64,
+    green: f64,
+    blue: f64,
+}
+
+impl Corner {
+    fn anchor(self) -> Anchor {
+        match self {
+            Self::TopLeft => Anchor::Top | Anchor::Left,
+            Self::TopRight => Anchor::Top | Anchor::Right,
+            Self::BottomLeft => Anchor::Bottom | Anchor::Left,
+            Self::BottomRight => Anchor::Bottom | Anchor::Right,
+        }
+    }
+
+    fn layer_margins(self, margins: &Margins) -> Margins {
+        match self {
+            Self::TopLeft => Margins {
+                top: margins.top,
+                right: 0,
+                bottom: 0,
+                left: margins.left,
+            },
+            Self::TopRight => Margins {
+                top: margins.top,
+                right: margins.right,
+                bottom: 0,
+                left: 0,
+            },
+            Self::BottomLeft => Margins {
+                top: 0,
+                right: 0,
+                bottom: margins.bottom,
+                left: margins.left,
+            },
+            Self::BottomRight => Margins {
+                top: 0,
+                right: margins.right,
+                bottom: margins.bottom,
+                left: 0,
+            },
+        }
+    }
 }
 
 struct Overlay {
@@ -123,7 +241,7 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let text = parse_args()?;
+    let options = Options::from(Cli::parse());
     let conn = Connection::connect_to_env()?;
     let (globals, mut event_queue) = registry_queue_init::<App>(&conn)?;
     let qh = event_queue.handle();
@@ -131,7 +249,7 @@ fn run() -> Result<()> {
     let compositor = bind::<WlCompositor>(&globals, &qh, 4..=6)?;
     let shm = bind::<WlShm>(&globals, &qh, 1..=1)?;
     let layer_shell = bind::<ZwlrLayerShellV1>(&globals, &qh, 1..=4)?;
-    let layout = WatermarkLayout::measure(&text)?;
+    let layout = WatermarkLayout::measure(&options.text)?;
     let outputs = globals
         .contents()
         .clone_list()
@@ -151,7 +269,7 @@ fn run() -> Result<()> {
     let mut app = App {
         compositor,
         shm,
-        text,
+        options,
         logical_width: layout.width,
         logical_height: layout.height,
         overlays: Vec::with_capacity(outputs.len()),
@@ -166,32 +284,63 @@ fn run() -> Result<()> {
     }
 }
 
-fn parse_args() -> Result<WatermarkText> {
-    let mut args = env::args().skip(1);
-    let Some(line1) = args.next() else {
-        return Ok(WatermarkText {
-            line1: DEFAULT_LINE1.to_owned(),
-            line2: DEFAULT_LINE2.to_owned(),
-        });
-    };
-
-    if line1 == "-h" || line1 == "--help" {
-        print_usage();
-        process::exit(0);
+impl From<Cli> for Options {
+    fn from(cli: Cli) -> Self {
+        let margin = cli.margin;
+        Self {
+            text: WatermarkText {
+                line1: cli.line1,
+                line2: cli.line2,
+            },
+            corner: cli.corner,
+            margins: Margins {
+                top: cli.margin_top.or(margin).unwrap_or(DEFAULT_TOP_MARGIN),
+                right: cli.margin_right.or(margin).unwrap_or(DEFAULT_RIGHT_MARGIN),
+                bottom: cli
+                    .margin_bottom
+                    .or(margin)
+                    .unwrap_or(DEFAULT_BOTTOM_MARGIN),
+                left: cli.margin_left.or(margin).unwrap_or(DEFAULT_LEFT_MARGIN),
+            },
+            color: cli.color,
+            opacity: cli.opacity,
+        }
     }
-
-    let line2 = args.next().unwrap_or_else(|| DEFAULT_LINE2.to_owned());
-    if args.next().is_some() {
-        return Err("usage: activate-linux [line1 [line2]]".into());
-    }
-
-    Ok(WatermarkText { line1, line2 })
 }
 
-fn print_usage() {
-    println!(
-        "usage: activate-linux [line1 [line2]]\n\nDefaults:\n  line1: {DEFAULT_LINE1}\n  line2: {DEFAULT_LINE2}"
-    );
+fn parse_color(input: &str) -> std::result::Result<Color, String> {
+    let hex = input.strip_prefix('#').unwrap_or(input);
+    let expanded;
+    let hex = match hex.len() {
+        3 => {
+            expanded = hex.chars().flat_map(|ch| [ch, ch]).collect::<String>();
+            expanded.as_str()
+        }
+        6 => hex,
+        _ => return Err("expected #RGB, #RRGGBB, RGB, or RRGGBB".to_owned()),
+    };
+
+    let value = u32::from_str_radix(hex, 16).map_err(|_| "invalid hex color".to_owned())?;
+    Ok(Color {
+        red: f64::from((value >> 16) & 0xff) / 255.0,
+        green: f64::from((value >> 8) & 0xff) / 255.0,
+        blue: f64::from(value & 0xff) / 255.0,
+    })
+}
+
+fn parse_opacity(input: &str) -> std::result::Result<f64, String> {
+    let opacity = input
+        .parse::<f64>()
+        .map_err(|_| "opacity must be a number from 0.0 to 1.0".to_owned())?;
+    if (0.0..=1.0).contains(&opacity) {
+        Ok(opacity)
+    } else {
+        Err("opacity must be from 0.0 to 1.0".to_owned())
+    }
+}
+
+fn visual_margin(margin: i32) -> i32 {
+    margin - RASTER_PADDING
 }
 
 fn bind<I>(
@@ -224,12 +373,13 @@ fn create_overlay(
     );
 
     layer_surface.set_size(app.logical_width as u32, app.logical_height as u32);
-    layer_surface.set_anchor(Anchor::Right | Anchor::Bottom);
+    layer_surface.set_anchor(app.options.corner.anchor());
+    let margins = app.options.corner.layer_margins(&app.options.margins);
     layer_surface.set_margin(
-        0,
-        RIGHT_MARGIN - RASTER_PADDING,
-        BOTTOM_MARGIN - RASTER_PADDING,
-        0,
+        visual_margin(margins.top),
+        visual_margin(margins.right),
+        visual_margin(margins.bottom),
+        visual_margin(margins.left),
     );
     layer_surface.set_exclusive_zone(-1);
     layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
@@ -262,7 +412,8 @@ fn line_extents(cr: &Context, text: &str, point_size: f64) -> Result<LineExtents
     })
 }
 
-fn render_watermark(text: &WatermarkText, scale: i32) -> Result<RenderedWatermark> {
+fn render_watermark(options: &Options, scale: i32) -> Result<RenderedWatermark> {
+    let text = &options.text;
     let layout = WatermarkLayout::measure(text)?;
     let logical_width = layout.width;
     let logical_height = layout.height;
@@ -276,7 +427,12 @@ fn render_watermark(text: &WatermarkText, scale: i32) -> Result<RenderedWatermar
         cr.set_operator(Operator::Clear);
         cr.paint()?;
         cr.set_operator(Operator::Over);
-        cr.set_source_rgba(1.0, 1.0, 1.0, TEXT_ALPHA);
+        cr.set_source_rgba(
+            options.color.red,
+            options.color.green,
+            options.color.blue,
+            options.opacity,
+        );
         cr.scale(scale as f64, scale as f64);
 
         cr.select_font_face("Sans", FontSlant::Normal, FontWeight::Normal);
@@ -313,7 +469,7 @@ fn points_to_pixels(points: f64) -> f64 {
 
 fn draw_overlay(app: &mut App, index: usize, qh: &QueueHandle<App>) -> Result<()> {
     let scale = app.overlays[index].scale;
-    let rendered = render_watermark(&app.text, scale)?;
+    let rendered = render_watermark(&app.options, scale)?;
     let (buffer, file) = create_shm_buffer(&app.shm, rendered, qh)?;
     let overlay = &mut app.overlays[index];
     overlay.surface.set_buffer_scale(scale);

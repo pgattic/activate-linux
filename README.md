@@ -38,3 +38,28 @@ Make it say whatever you want using positional arguments:
 ```sh
 activate-linux "First line" "Second line"
 ```
+
+Customize placement and appearance with flags:
+
+```sh
+activate-linux \
+  --corner top-left \
+  --margin 32 \
+  --color '#ffcc00' \
+  --opacity 0.5 \
+  "Activated Linux" "Everything is configured."
+```
+
+Available placement flags:
+
+```sh
+--corner top-left|top-right|bottom-left|bottom-right
+--margin PX
+--margin-top PX
+--margin-right PX
+--margin-bottom PX
+--margin-left PX
+```
+
+`--color` accepts `#RGB`, `#RRGGBB`, `RGB`, or `RRGGBB`.
+`--opacity` accepts a value from `0.0` to `1.0`.
